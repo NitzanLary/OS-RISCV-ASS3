@@ -11,6 +11,8 @@ uint ticks;
 
 extern char trampoline[], uservec[], userret[];
 
+extern int handle_cow(pagetable_t, uint64);
+
 // in kernelvec.S, calls kerneltrap().
 void kernelvec();
 
@@ -28,6 +30,7 @@ trapinithart(void)
 {
   w_stvec((uint64)kernelvec);
 }
+
 
 //
 // handle an interrupt, exception, or system call from user space.
@@ -65,6 +68,12 @@ usertrap(void)
     intr_on();
 
     syscall();
+  }
+  else if(r_scause() == 13 || r_scause() == 15){
+    uint64 va = r_stval();
+    if(va >= p->sz || handle_cow(p->pagetable, va) != 0){
+      p->killed = 1;
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

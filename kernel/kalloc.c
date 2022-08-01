@@ -9,7 +9,13 @@
 #include "riscv.h"
 #include "defs.h"
 
+#define NUM_PHYS_PAGES ((PHYSTOP - KERNBASE) / PGSIZE)
+#define PA2IDX(pa) (((uint64)pa - KERNBASE) / PGSIZE)
+
+
 void freerange(void *pa_start, void *pa_end);
+
+extern uint64 cas(volatile void *addr, int expected , int newval);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
@@ -23,10 +29,15 @@ struct {
   struct run *freelist;
 } kmem;
 
+int refs[NUM_PHYS_PAGES];
+//struct spinlock r_lock;
+
 void
 kinit()
 {
   initlock(&kmem.lock, "kmem");
+  //initlock(&r_lock, "refs");
+  memset(refs, 0, sizeof(int)*NUM_PHYS_PAGES);
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -39,6 +50,31 @@ freerange(void *pa_start, void *pa_end)
     kfree(p);
 }
 
+int 
+ref_add(uint64 pa){
+  int ref;
+  do{
+    ref = refs[PA2IDX(pa)];
+  } while(cas(&refs[PA2IDX(pa)], ref, ref+1));
+  ref++;
+  return ref;
+}
+
+int 
+ref_remove(uint64 pa){
+  int ref;
+  do{
+    ref = refs[PA2IDX(pa)];
+  } while(cas(&refs[PA2IDX(pa)], ref, ref-1));
+  return ref-1;
+}
+
+int
+ref_find(uint64 pa){
+  return refs[PA2IDX(pa)];
+}
+
+
 // Free the page of physical memory pointed at by v,
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
@@ -50,6 +86,12 @@ kfree(void *pa)
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+  
+  if(ref_remove((uint64) pa) > 0){
+    return;
+  }
+
+  refs[PA2IDX(pa)] = 0;
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -72,8 +114,12 @@ kalloc(void)
 
   acquire(&kmem.lock);
   r = kmem.freelist;
-  if(r)
+  
+  if(r){
+    refs[PA2IDX(r)] = 1;
     kmem.freelist = r->next;
+  }
+  
   release(&kmem.lock);
 
   if(r)
